@@ -55,6 +55,27 @@
             color: #666;
             font-style: italic;
         }
+
+        .code-map {
+            margin-top: 10px;
+            padding: 10px;
+            background: #eef;
+            border: 1px solid #99f;
+        }
+
+        .dispatched-codes {
+            margin-top: 10px;
+            width: 100%;
+            height: 100px;
+            font-family: monospace;
+            background: #efe;
+            border: 1px solid #9f9;
+        }
+
+        .code-count {
+            font-weight: bold;
+            color: #44a;
+        }
     </style>
 </head>
 <body>
@@ -75,7 +96,14 @@
             <button id="startCamera">Start Camera</button>
             <button id="stopCamera">Stop Camera</button>
         </div>
-        <div class="results" id="cameraResults"></div>
+        <div class="code-map">
+            <h3>Current Batch (<span id="codeCount" class="code-count">0</span> codes)</h3>
+            <div class="results" id="cameraResults"></div>
+        </div>
+        <div>
+            <h3>Dispatched Codes</h3>
+            <textarea id="dispatchedCodes" class="dispatched-codes" readonly></textarea>
+        </div>
     </div>
 
     <div>
@@ -89,28 +117,74 @@
 <!-- Register barcode detector polyfill -->
 <script type="module" src="https://fastly.jsdelivr.net/npm/barcode-detector@3/dist/es/polyfill.min.js"></script>
 
-<!-- Main script -->
 <script type="module">
+    const SCAN_INTERVAL = 100; // Scan frequency (0.1 second)
+    const CALLBACK_INTERVAL = 3000; // Callback frequency (3 seconds)
+
+    // Separate detector configurations
+    const DETECTOR_CONFIGS = {
+        dataMatrix: {
+            formats: ["data_matrix"]
+        },
+        qrCode: {
+            formats: ["qr_code", "micro_qr_code", "rm_qr_code"]
+        },
+        gtin: {
+            formats: [
+                "ean_13",
+                "ean_8",
+                "upc_a",
+                "upc_e"
+            ]
+        },
+        others: {
+            formats: [
+                "codabar",
+                "code_39",
+                "code_93",
+                "code_128",
+                "databar",
+                "databar_limited",
+                "databar_expanded",
+                "dx_film_edge",
+                "itf"
+            ]
+        }
+    };
+
     // Elements
     const video = document.getElementById('video');
-    const imageInput = document.getElementById('imageInput');
-    const imagePreview = document.getElementById('imagePreview');
-    const supportedFormatsDiv = document.getElementById('supportedFormats');
+    const codeCountSpan = document.getElementById('codeCount');
     const cameraResultsDiv = document.getElementById('cameraResults');
-    const imageResultsDiv = document.getElementById('imageResults');
+    const dispatchedCodesTextarea = document.getElementById('dispatchedCodes');
     const startCameraButton = document.getElementById('startCamera');
     const stopCameraButton = document.getElementById('stopCamera');
+    const supportedFormatsDiv = document.getElementById('supportedFormats');
+    const imageInput = document.getElementById('imageInput');
+    const imagePreview = document.getElementById('imagePreview');
+    const imageResultsDiv = document.getElementById('imageResults');
 
     let stream = null;
-    let detectionInterval = null;
+    let scanTimeout = null;
+    let callbackTimeout = null;
+    let detectedCodes = new Map();
+    let detectors = {};
 
-    // Initialize by checking supported formats
+    // Initialize by checking supported formats and creating detectors
     async function initialize() {
         try {
             const formats = await BarcodeDetector.getSupportedFormats();
             supportedFormatsDiv.textContent = formats.join(', ');
+
+            // Create detectors
+            detectors = {
+                dataMatrix: new BarcodeDetector(DETECTOR_CONFIGS.dataMatrix),
+                qrCode: new BarcodeDetector(DETECTOR_CONFIGS.qrCode),
+                gtin: new BarcodeDetector(DETECTOR_CONFIGS.gtin),
+                others: new BarcodeDetector(DETECTOR_CONFIGS.others)
+            };
         } catch (error) {
-            supportedFormatsDiv.textContent = 'Error getting supported formats: ' + error.message;
+            supportedFormatsDiv.textContent = 'Error initializing BarcodeDetector: ' + error.message;
         }
     }
 
@@ -132,28 +206,90 @@
             stream.getTracks().forEach(track => track.stop());
             video.srcObject = null;
         }
-        if (detectionInterval) {
-            clearInterval(detectionInterval);
+        if (scanTimeout) {
+            clearTimeout(scanTimeout);
         }
-        cameraResultsDiv.textContent = '';
+        if (callbackTimeout) {
+            clearInterval(callbackTimeout);
+        }
+        detectedCodes.clear();
+        updateResults();
     }
 
-    // Barcode detection
+    // Barcode detection with multiple detectors
     async function startDetection() {
-        const barcodeDetector = new BarcodeDetector();
-
-        detectionInterval = setInterval(async () => {
+        async function detectWithAllDetectors() {
             try {
-                const barcodes = await barcodeDetector.detect(video);
-                if (barcodes.length > 0) {
-                    cameraResultsDiv.innerHTML = barcodes.map(barcode =>
-                        `Format: ${barcode.format}, Value: ${barcode.rawValue}`
-                    ).join('<br>');
-                }
+                // Run all detectors in parallel
+                const results = await Promise.all([
+                    detectors.dataMatrix.detect(video),
+                    detectors.qrCode.detect(video),
+                    detectors.gtin.detect(video),
+                    detectors.others.detect(video)
+                ]);
+
+                // Process results from all detectors
+                results.forEach((codesDetected) => {
+                    if (codesDetected && codesDetected.length > 0) {
+                        codesDetected.forEach(code => {
+                            if (!detectedCodes.has(code.rawValue)) {
+                                detectedCodes.set(code.rawValue, {
+                                    rawValue: code.rawValue,
+                                    format: code.format,
+                                    timestamp: new Date().toISOString()
+                                });
+                                console.log(`Added ${code.format} code: ${code.rawValue}`);
+                            }
+                        });
+                    }
+                });
+                updateResults();
             } catch (error) {
                 console.error('Detection error:', error);
             }
-        }, 1000);
+        }
+
+        function detect(waitTime = SCAN_INTERVAL) {
+            scanTimeout = setTimeout(async () => {
+                await detectWithAllDetectors();
+                detect(SCAN_INTERVAL);
+            }, waitTime);
+        }
+
+        // Start detection loop
+        detect();
+
+        // Start dispatch timer
+        callbackTimeout = setInterval(() => {
+            if (detectedCodes.size > 0) {
+                const batchText = formatBatchForDisplay();
+                dispatchedCodesTextarea.value =
+                    `=== Batch ${new Date().toISOString()} ===\n${batchText}\n\n` +
+                    dispatchedCodesTextarea.value;
+                detectedCodes.clear();
+                updateResults();
+            }
+        }, CALLBACK_INTERVAL);
+    }
+
+    // Update results display
+    function updateResults() {
+        codeCountSpan.textContent = detectedCodes.size;
+
+        if (detectedCodes.size > 0) {
+            cameraResultsDiv.innerHTML = formatBatchForDisplay();
+        } else {
+            cameraResultsDiv.textContent = 'No codes in current batch';
+        }
+    }
+
+    // Format batch for display
+    function formatBatchForDisplay() {
+        return Array.from(detectedCodes.entries())
+            .map(([code, details]) =>
+                `Code: ${code}\nFormat: ${details.format}\nDetected: ${details.timestamp}`
+            )
+            .join('\n---\n');
     }
 
     // Image upload handling
@@ -176,11 +312,18 @@
             await loadImage;
             imagePreview.style.display = 'block';
 
-            const barcodeDetector = new BarcodeDetector();
-            const barcodes = await barcodeDetector.detect(imagePreview);
+            // Detect barcodes in the image
+            const results = await Promise.all([
+                detectors.dataMatrix.detect(imagePreview),
+                detectors.qrCode.detect(imagePreview),
+                detectors.gtin.detect(imagePreview),
+                detectors.others.detect(imagePreview)
+            ]);
 
-            if (barcodes.length > 0) {
-                imageResultsDiv.innerHTML = barcodes.map(barcode =>
+            const allBarcodes = results.flat();
+
+            if (allBarcodes.length > 0) {
+                imageResultsDiv.innerHTML = allBarcodes.map(barcode =>
                     `Format: ${barcode.format}, Value: ${barcode.rawValue}`
                 ).join('<br>');
             } else {
