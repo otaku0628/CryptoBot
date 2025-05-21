@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Barcode Detection Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 640px;
+        }
+
+        #video {
+            width: 100%;
+            border: 2px solid #ccc;
+        }
+
+        #imagePreview {
+            max-width: 100%;
+            margin-top: 10px;
+        }
+
+        .results {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-top: 10px;
+            min-height: 100px;
+            background: #f9f9f9;
+        }
+
+        .controls {
+            margin: 10px 0;
+        }
+
+        button {
+            padding: 8px 16px;
+            margin-right: 10px;
+        }
+
+        .loading {
+            color: #666;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Barcode Detection Demo</h1>
+
+    <div>
+        <h2>Supported Formats:</h2>
+        <div id="supportedFormats" class="results"></div>
+    </div>
+
+    <div>
+        <h2>Camera Feed</h2>
+        <div class="video-container">
+            <video id="video" autoplay playsinline></video>
+        </div>
+        <div class="controls">
+            <button id="startCamera">Start Camera</button>
+            <button id="stopCamera">Stop Camera</button>
+        </div>
+        <div class="results" id="cameraResults"></div>
+    </div>
+
+    <div>
+        <h2>Image Upload</h2>
+        <input type="file" id="imageInput" accept="image/*">
+        <img id="imagePreview" style="display: none;">
+        <div class="results" id="imageResults"></div>
+    </div>
+</div>
+
+<!-- Register barcode detector polyfill -->
+<script type="module" src="https://fastly.jsdelivr.net/npm/barcode-detector@3/dist/es/polyfill.min.js"></script>
+
+<!-- Main script -->
+<script type="module">
+    // Elements
+    const video = document.getElementById('video');
+    const imageInput = document.getElementById('imageInput');
+    const imagePreview = document.getElementById('imagePreview');
+    const supportedFormatsDiv = document.getElementById('supportedFormats');
+    const cameraResultsDiv = document.getElementById('cameraResults');
+    const imageResultsDiv = document.getElementById('imageResults');
+    const startCameraButton = document.getElementById('startCamera');
+    const stopCameraButton = document.getElementById('stopCamera');
+
+    let stream = null;
+    let detectionInterval = null;
+
+    // Initialize by checking supported formats
+    async function initialize() {
+        try {
+            const formats = await BarcodeDetector.getSupportedFormats();
+            supportedFormatsDiv.textContent = formats.join(', ');
+        } catch (error) {
+            supportedFormatsDiv.textContent = 'Error getting supported formats: ' + error.message;
+        }
+    }
+
+    // Camera handling
+    async function startCamera() {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment' }
+            });
+            video.srcObject = stream;
+            startDetection();
+        } catch (error) {
+            cameraResultsDiv.textContent = 'Error accessing camera: ' + error.message;
+        }
+    }
+
+    function stopCamera() {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+            video.srcObject = null;
+        }
+        if (detectionInterval) {
+            clearInterval(detectionInterval);
+        }
+        cameraResultsDiv.textContent = '';
+    }
+
+    // Barcode detection
+    async function startDetection() {
+        const barcodeDetector = new BarcodeDetector();
+
+        detectionInterval = setInterval(async () => {
+            try {
+                const barcodes = await barcodeDetector.detect(video);
+                if (barcodes.length > 0) {
+                    cameraResultsDiv.innerHTML = barcodes.map(barcode =>
+                        `Format: ${barcode.format}, Value: ${barcode.rawValue}`
+                    ).join('<br>');
+                }
+            } catch (error) {
+                console.error('Detection error:', error);
+            }
+        }, 1000);
+    }
+
+    // Image upload handling
+    async function handleImageUpload(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        imageResultsDiv.innerHTML = '<span class="loading">Processing image...</span>';
+        imagePreview.style.display = 'none';
+
+        // Create a new promise that resolves when the image is loaded
+        const loadImage = new Promise((resolve, reject) => {
+            imagePreview.onload = () => resolve();
+            imagePreview.onerror = () => reject(new Error('Failed to load image'));
+            imagePreview.src = URL.createObjectURL(file);
+        });
+
+        try {
+            // Wait for image to load
+            await loadImage;
+            imagePreview.style.display = 'block';
+
+            const barcodeDetector = new BarcodeDetector();
+            const barcodes = await barcodeDetector.detect(imagePreview);
+
+            if (barcodes.length > 0) {
+                imageResultsDiv.innerHTML = barcodes.map(barcode =>
+                    `Format: ${barcode.format}, Value: ${barcode.rawValue}`
+                ).join('<br>');
+            } else {
+                imageResultsDiv.textContent = 'No barcodes detected';
+            }
+        } catch (error) {
+            imageResultsDiv.textContent = 'Error detecting barcodes: ' + error.message;
+            console.error('Detection error:', error);
+        }
+    }
+
+    // Event listeners
+    startCameraButton.addEventListener('click', startCamera);
+    stopCameraButton.addEventListener('click', stopCamera);
+    imageInput.addEventListener('change', handleImageUpload);
+
+    // Initialize
+    initialize();
+</script>
+</body>
+</html>
